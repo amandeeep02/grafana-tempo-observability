@@ -1,0 +1,37 @@
+=== 1. Resource footprint (docker stats) ===
+NAME                CPU %     MEM USAGE / LIMIT
+grafana             0.29%     173MiB / 7.654GiB
+inventory-service   3.37%     57.76MiB / 7.654GiB
+k6                  1.74%     39.22MiB / 7.654GiB
+mailpit             0.06%     49.32MiB / 7.654GiB
+node-exporter       0.00%     15.3MiB / 7.654GiB
+prometheus          0.13%     107.2MiB / 7.654GiB
+store-api           8.18%     62.66MiB / 7.654GiB
+tempo               0.65%     472.3MiB / 7.654GiB
+TOTAL stack RAM: 977 MiB
+
+=== 2. Tempo storage ===
+Tempo container up since: 2026-10-06T11:19:13.606428335Z
+35.3M	/var/tempo
+HTTP request rate (both services): 17.71784983575894 req/s
+
+=== 3. Prometheus ===
+Head series: 9353
+14.2M	/prometheus
+
+=== 4. Trace ingestion ===
+Spans received/s: 51.17716571220798
+
+=== 5. Trace lookup by ID (5 recent traces) ===
+  11.9 ms
+  6.4 ms
+  6.0 ms
+  4.5 ms
+  39.0 ms
+  avg 13.6 ms
+
+=== 6. MTTD: CPU chaos → alert Firing → email (runs: 3) ===
+  run 1: firing after 79.3s, email after 88.8s
+  run 2: firing after 80.0s, email after 89.4s
+  run 3: firing after 80.0s, email after 89.4s
+  AVERAGE: firing 79.8s, email 89.2s

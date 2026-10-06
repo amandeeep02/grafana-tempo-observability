@@ -1,0 +1,11 @@
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: devops-team-email
+    receivers:
+      - uid: devops-email-receiver
+        type: email
+        disableResolveMessage: false
+        settings:
+          addresses: devops-team@devops-ia.local
+          singleEmail: true

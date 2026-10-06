@@ -1,0 +1,35 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+  external_labels:
+    project: devops-ia-grafana-tempo
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: node
+    static_configs:
+      - targets: ["docker-host:9100"]   # node-exporter runs with network_mode: host
+        labels: { instance: "demo-host" }
+
+  - job_name: store-api
+    static_configs:
+      - targets: ["store-api:8000"]
+
+  - job_name: inventory-service
+    static_configs:
+      - targets: ["inventory-service:8001"]
+
+  - job_name: tempo
+    static_configs:
+      - targets: ["tempo:3200"]
+
+  - job_name: grafana
+    static_configs:
+      - targets: ["grafana:3000"]
+
+  - job_name: cadvisor          # target is DOWN unless --profile full; that is expected
+    static_configs:
+      - targets: ["cadvisor:8080"]

@@ -1,0 +1,147 @@
+name: grafana-tempo-observability
+
+networks:
+  observability:
+    ipam:
+      config:
+        - subnet: 172.30.250.0/24   # fixed so Prometheus can reach host-network node-exporter at the gateway
+          gateway: 172.30.250.1
+
+volumes:
+  prometheus-data:
+  tempo-data:
+  grafana-data:
+
+services:
+  store-api:
+    build: ./apps/store-api
+    container_name: store-api
+    environment:
+      SERVICE_NAME: store-api
+      INVENTORY_URL: http://inventory-service:8001
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
+    ports: ["8000:8000"]
+    depends_on:
+      inventory-service: { condition: service_healthy }
+      tempo: { condition: service_started }
+    networks: [observability]
+    restart: unless-stopped
+
+  inventory-service:
+    build: ./apps/inventory-service
+    container_name: inventory-service
+    environment:
+      SERVICE_NAME: inventory-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
+    ports: ["8001:8001"]
+    depends_on:
+      tempo: { condition: service_started }
+    networks: [observability]
+    restart: unless-stopped
+
+  k6:
+    image: grafana/k6:1.0.0
+    container_name: k6
+    command: ["run", "--quiet", "--no-summary", "/scripts/script.js"]
+    environment:
+      BASE_URL: http://store-api:8000
+    volumes:
+      - ./load/k6:/scripts:ro
+    depends_on:
+      store-api: { condition: service_healthy }
+    networks: [observability]
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.8.1
+    container_name: tempo
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    user: "0"            # avoids 'permission denied' on the named volume (image runs as uid 10001)
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200"      # Tempo HTTP API
+      - "4317:4317"      # OTLP gRPC
+      - "4318:4318"      # OTLP HTTP
+    networks: [observability]
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.4.1
+    container_name: prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-remote-write-receiver     # Tempo metrics-generator writes here
+      - --enable-feature=exemplar-storage      # metrics -> traces links
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    extra_hosts:
+      - "docker-host:172.30.250.1"            # host network namespace (node-exporter)
+    ports: ["9090:9090"]
+    networks: [observability]
+    restart: unless-stopped
+
+  node-exporter:
+    image: prom/node-exporter:v1.9.1
+    container_name: node-exporter
+    command:
+      - --path.rootfs=/host
+    network_mode: host        # see the host's real network interfaces (not a container's eth0); listens on :9100
+    pid: host
+    volumes:
+      - /:/host:ro            # Linux servers may use "/:/host:ro,rslave"; Docker Desktop rejects rslave
+    restart: unless-stopped
+
+  cadvisor:                    # STRETCH; started only with: docker compose --profile full up -d
+    image: gcr.io/cadvisor/cadvisor:v0.52.1
+    container_name: cadvisor
+    profiles: ["full"]
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports: ["8081:8080"]
+    networks: [observability]
+    restart: unless-stopped
+
+  mailpit:
+    image: axllent/mailpit:v1.27
+    container_name: mailpit
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+    ports:
+      - "8025:8025"   # web inbox
+      - "1025:1025"   # SMTP
+    networks: [observability]
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.0.2
+    container_name: grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SMTP_ENABLED: "true"
+      GF_SMTP_HOST: mailpit:1025
+      GF_SMTP_FROM_ADDRESS: grafana-alerts@devops-ia.local
+      GF_SMTP_FROM_NAME: Grafana DevOps IA
+      GF_SMTP_SKIP_VERIFY: "true"
+      GF_UNIFIED_ALERTING_ENABLED: "true"
+      GF_SERVER_ROOT_URL: http://localhost:3000
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports: ["3000:3000"]
+    depends_on: [prometheus, tempo, mailpit]
+    networks: [observability]
+    restart: unless-stopped

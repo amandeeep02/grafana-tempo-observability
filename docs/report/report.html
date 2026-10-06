@@ -1,0 +1,774 @@
+<!doctype html><html><head><meta charset="utf-8"><title>DevOps IA-2 Report — Grafana & Tempo</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm 18mm 16mm; }
+  body { font: 10.5pt/1.5 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color: #1a1a1a; }
+  h1 { font-size: 24pt; margin: .4em 0; } h2 { font-size: 15pt; border-bottom: 2px solid #f46800; padding-bottom: 3px;
+  margin-top: 1.6em; break-after: avoid; } h3 { font-size: 12pt; break-after: avoid; }
+  table { border-collapse: collapse; width: 100%; margin: .6em 0; font-size: 8.8pt; break-inside: avoid; }
+  th, td { border: 1px solid #ccc; padding: 3px 6px; vertical-align: top; text-align: left; } th { background: #f3f3f3; }
+  code { font: 8.8pt Menlo, Consolas, monospace; background: #f4f4f4; padding: 0 2px; }
+  pre { background: #f6f8fa; border: 1px solid #e1e4e8; padding: 8px; font-size: 7.6pt; white-space: pre; overflow: hidden; break-inside: avoid; }
+  pre code { background: none; font-size: inherit; }
+  img { max-width: 100%; max-height: 125mm; display: block; margin: .5em auto; border: 1px solid #ddd; break-inside: avoid; }
+  p:has(img) { break-inside: avoid; }
+  .title-page { text-align: center; height: 250mm; display: flex; flex-direction: column; justify-content: center;
+    break-after: page; } .title-page .inst { font-size: 15pt; font-weight: 600; }
+  .title-page h1 { font-size: 28pt; color: #f46800; margin-top: 1.2em; } .subtitle { font-size: 14pt; margin-bottom: 2em; }
+  .members { width: 60%; margin: 1em auto; font-size: 11pt; break-inside: avoid; }
+</style></head><body><div class="title-page">
+
+<p class="inst">Somaiya Vidyavihar University<br>K. J. Somaiya College of Engineering</p>
+<p>Department of Computer Engineering · L.Y. B.Tech · Semester VII (2026-2027)</p>
+<p>Course: <b>DevOps</b> (216U01E744) · <b>IA-2 Case Study Assignment</b></p>
+
+<h1>Monitoring and Data Visualization using Grafana</h1>
+<p class="subtitle">Tool: <b>Grafana Tempo</b> (with Grafana, Prometheus and OpenTelemetry)</p>
+
+<table class="members">
+<tr><th>Group member</th><th>Roll no.</th></tr>
+<tr><td>Amrit Nigam</td><td>16010123038</td></tr>
+<tr><td>Omik Acharya</td><td>16010123218</td></tr>
+<tr><td>Amandeep Singh</td><td>16010123036</td></tr>
+</table>
+
+<p>Faculty in-charge: <b>Mr. Swapnil Pawar (SCP)</b></p>
+<p>Date: October 2026</p>
+</div>
+
+<h2>Abstract</h2>
+<p>Modern applications are split into many small services, so when something goes wrong it is hard to tell <em>which</em>
+service is at fault. This case study builds a complete, reproducible observability stack that answers both questions an
+operator asks during an incident: <em>is something wrong?</em> and <em>where is it wrong?</em> Prometheus collects system metrics
+(CPU, memory, disk, network via Node Exporter) and application RED metrics from two instrumented Python microservices;
+Grafana Tempo stores the distributed traces those services emit through OpenTelemetry; Grafana visualises both on three
+dashboards and evaluates six alert rules that send email notifications. Exemplars and Tempo&#39;s metrics-generator link the
+two worlds, so a latency spike on a graph opens the exact slow trace in one click. The whole stack — services, data
+sources, dashboards, alert rules and contact points — is defined as code and starts with a single
+<code>docker compose up</code>. We demonstrate it with four fault-injection scenarios and measure its footprint and alerting delay.</p>
+<h2>1. Introduction</h2>
+<p><strong>Monitoring</strong> watches known indicators against known thresholds (&quot;is CPU above 80 %?&quot;). <strong>Observability</strong> is the
+broader ability to understand a system&#39;s internal state from its outputs, including questions nobody predicted. It
+rests on three pillars:</p>
+<table>
+<thead>
+<tr>
+<th>Pillar</th>
+<th>What it is</th>
+<th>Strength</th>
+<th>Tool in this project</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Metrics</td>
+<td>Numeric time series aggregated over time</td>
+<td>Cheap, ideal for dashboards and alerting</td>
+<td>Prometheus + Node Exporter</td>
+</tr>
+<tr>
+<td>Logs</td>
+<td>Discrete, timestamped event records</td>
+<td>Detailed context of individual events</td>
+<td>stdout logs with <code>trace_id</code> (Loki is future work)</td>
+</tr>
+<tr>
+<td>Traces</td>
+<td>The end-to-end path of one request across services, as a tree of timed <em>spans</em></td>
+<td>Shows <em>where</em> time is spent and <em>which</em> service failed</td>
+<td>Grafana Tempo + OpenTelemetry</td>
+</tr>
+</tbody></table>
+<p>In the DevOps lifecycle (Plan → Code → Build → Test → Release → Deploy → <strong>Operate → Monitor</strong>) observability closes
+the feedback loop: what is learned while operating the system feeds back into planning and coding. Keeping the
+monitoring configuration itself in version control (&quot;observability as code&quot;) makes it reviewable, reproducible and
+testable in CI, exactly like application code.</p>
+<h2>2. Problem Statement and Objectives</h2>
+<p><strong>Problem.</strong> In a microservice system, a dashboard can show that the 95th-percentile latency of the shop went from
+200 ms to 1.7 s, but not which of the services involved caused it. Engineers lose time guessing.</p>
+<p><strong>Objectives</strong> (mirroring the registered practical demonstration, extended with the registered tool):</p>
+<ol>
+<li>Set up Grafana with Prometheus as a monitoring data source.</li>
+<li>Build dashboards visualising <strong>CPU, memory, disk, network</strong> and <strong>application performance</strong> with graphs and gauges.</li>
+<li>Configure <strong>alerts</strong> that fire when a selected metric exceeds a threshold, and deliver them by email.</li>
+<li>Deploy <strong>Grafana Tempo</strong> as the tracing backend, instrument the services with OpenTelemetry, and show a service map,
+TraceQL search and a one-click jump from a metric spike to the responsible trace.</li>
+<li>Provision everything as code, reproducible with one command, and evaluate the result against alternatives with
+our own measurements.</li>
+</ol>
+<h2>3. Tool Study</h2>
+<h3>3.1 Grafana</h3>
+<p>Grafana is an open-source visualisation and alerting platform. Key features used here:</p>
+<ul>
+<li><strong>Data sources</strong>: 100+ plugins; we use Prometheus (PromQL) and Tempo (TraceQL), cross-linked (exemplars → Tempo,
+trace → span metrics).</li>
+<li><strong>Dashboards and panels</strong>: gauge, stat, time series, bar gauge, state timeline, table, node graph, text; template
+variables (<code>$service</code>); dashboard links.</li>
+<li><strong>Unified alerting</strong>: rules are queries + expressions (reduce, threshold) evaluated on a schedule; <em>pending</em> period
+(<code>for</code>) suppresses flapping; notification policies route alerts to <strong>contact points</strong> (email here; Slack, webhook,
+PagerDuty also possible); multi-dimensional rules produce one alert instance per series.</li>
+<li><strong>Provisioning</strong>: YAML/JSON files under <code>/etc/grafana/provisioning</code> create data sources, dashboards, alert rules,
+contact points and policies at start-up — no manual clicking.</li>
+</ul>
+<h3>3.2 Grafana Tempo</h3>
+<p>Tempo is a high-volume, cost-efficient distributed tracing backend. It does <strong>not</strong> index traces in a database; it
+writes them to object storage (S3, GCS, Azure or local disk) as columnar <strong>Apache Parquet</strong> blocks.</p>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Distributor</td>
+<td>Receives spans (OTLP gRPC/HTTP, Jaeger, Zipkin) and hashes them by trace ID to ingesters</td>
+</tr>
+<tr>
+<td>Ingester</td>
+<td>Batches spans into blocks in a write-ahead log, then flushes them to storage (<code>max_block_duration: 5m</code> here)</td>
+</tr>
+<tr>
+<td>Query-frontend / Querier</td>
+<td>Splits searches into jobs and reads blocks (lookup by trace ID uses bloom filters)</td>
+</tr>
+<tr>
+<td>Compactor</td>
+<td>Merges small blocks and enforces retention (<code>block_retention: 48h</code>)</td>
+</tr>
+<tr>
+<td>Metrics-generator</td>
+<td>Derives metrics from spans: <code>span-metrics</code> (RED per span), <code>service-graphs</code> (edges between services), <code>local-blocks</code> (TraceQL metrics); remote-writes them to Prometheus</td>
+</tr>
+</tbody></table>
+<p>In this project Tempo runs as a single binary (&quot;monolithic mode&quot;), which contains all components; at scale the same
+components run as separate microservices.</p>
+<p><strong>TraceQL</strong> selects spans by attributes, duration, status and structure:</p>
+<pre><code>{ resource.service.name = &quot;store-api&quot; }                                  # all store-api spans
+{ status = error }                                                       # failed spans
+{ duration &gt; 500ms }                                                     # slow spans
+{ resource.service.name = &quot;inventory-service&quot; &amp;&amp; name = &quot;db.query&quot; &amp;&amp; duration &gt; 1s }
+{ resource.service.name = &quot;store-api&quot; } &gt;&gt; { name = &quot;db.query&quot; }         # structural: descendant spans
+</code></pre>
+<h3>3.3 Prometheus and Node Exporter</h3>
+<p>Prometheus <strong>pulls</strong> (scrapes) <code>/metrics</code> endpoints on an interval (5 s here) and stores samples in its local
+time-series database (TSDB). Data is queried with <strong>PromQL</strong>, e.g. CPU utilisation:</p>
+<pre><code>100 - (avg(rate(node_cpu_seconds_total{mode=&quot;idle&quot;}[1m])) * 100)
+</code></pre>
+<p><code>rate()</code> turns the ever-increasing idle-seconds counter into &quot;idle seconds per second&quot; (0–1 per core); averaging across
+cores and subtracting from 100 % gives busy CPU. Node Exporter exposes host metrics (CPU, memory, filesystems, disk
+I/O, network, load). Prometheus also acts as a <strong>remote-write receiver</strong> for Tempo&#39;s generated metrics and stores
+<strong>exemplars</strong> (sample trace IDs attached to histogram buckets).</p>
+<h3>3.4 OpenTelemetry</h3>
+<p>OpenTelemetry (OTel) is the vendor-neutral CNCF standard for telemetry. Our services use the Python SDK:</p>
+<ul>
+<li>A <strong>TracerProvider</strong> with resource attributes (<code>service.name</code>, <code>service.namespace</code>, <code>deployment.environment</code>) and a
+<code>BatchSpanProcessor</code> exporting over <strong>OTLP gRPC</strong> to Tempo.</li>
+<li><strong>Auto-instrumentation</strong> for Flask (a server span per request) and <code>requests</code> (a client span per outgoing call).</li>
+<li><strong>Context propagation</strong>: the <code>requests</code> instrumentation injects the W3C <code>traceparent</code> header
+(<code>00-&lt;trace-id&gt;-&lt;span-id&gt;-01</code>) into the call to inventory-service, whose Flask instrumentation extracts it and
+continues the <em>same</em> trace — this is what makes a single trace span both services.</li>
+<li><strong>Custom spans</strong> (<code>products.enrich</code>, <code>payment.process</code>, <code>db.query</code>, <code>db.update</code>) with attributes such as
+<code>db.statement</code>, <code>payment.method</code>, <code>order.amount</code>.</li>
+</ul>
+<h2>4. System Architecture</h2>
+<p><img src="../architecture.png" alt="Architecture"></p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Data flow</th>
+<th>Path</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>Metrics</td>
+<td>apps + Node Exporter expose <code>/metrics</code> → Prometheus scrapes every 5 s → Grafana queries with PromQL</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Traces</td>
+<td>each request creates spans → OTLP gRPC → Tempo distributor → ingester → blocks on disk → Grafana queries with TraceQL / trace ID</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Traces → metrics</td>
+<td>Tempo metrics-generator → <code>traces_spanmetrics_*</code>, <code>traces_service_graph_*</code> → remote write → Prometheus → service map, RED panels</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Metrics → traces</td>
+<td>latency histogram observations carry <code>trace_id</code> exemplars → Grafana draws exemplar dots → click opens the trace in Tempo</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Alerting</td>
+<td>Grafana evaluates rules every 10 s → <code>for</code> period → notification policy → email contact point → Mailpit</td>
+</tr>
+</tbody></table>
+<p><strong>Components and ports:</strong> store-api :8000, inventory-service :8001, k6 (≈11 req/s synthetic load), Tempo :3200 / OTLP
+:4317, Prometheus :9090, Node Exporter :9100 (host network), Grafana :3000, Mailpit (SMTP :1025, inbox :8025);
+cAdvisor :8081 is optional (<code>--profile full</code>).</p>
+<h2>5. Implementation</h2>
+<h3>5.1 Environment</h3>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Version / value</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Host</td>
+<td>macOS, Docker Desktop 28.3.2 (Linux VM: 10 vCPU, 7.65 GiB RAM), Compose v2.38</td>
+</tr>
+<tr>
+<td>Grafana</td>
+<td>12.0.2</td>
+</tr>
+<tr>
+<td>Grafana Tempo</td>
+<td>2.8.1</td>
+</tr>
+<tr>
+<td>Prometheus / Node Exporter</td>
+<td>v3.4.1 / v1.9.1</td>
+</tr>
+<tr>
+<td>k6 / Mailpit</td>
+<td>1.0.0 / v1.27</td>
+</tr>
+<tr>
+<td>Services</td>
+<td>Python 3.12, Flask 3.1, gunicorn 23 (1 worker × 8 threads), prometheus-client 0.22, OpenTelemetry 1.34.1 / 0.55b1</td>
+</tr>
+</tbody></table>
+<h3>5.2 Repository layout and one-command start</h3>
+<pre><code>docker-compose.yml          all 8 services (+ optional cAdvisor), pinned image tags, named volumes
+apps/store-api, apps/inventory-service    app.py, telemetry.py, metrics.py, chaos.py, Dockerfile
+prometheus/prometheus.yml   tempo/tempo.yaml   load/k6/script.js
+grafana/provisioning/       datasources, dashboard provider, alerting (contact point, policy, 6 rules)
+grafana/dashboards/         3 dashboards generated by scripts/gen_dashboards.py
+scripts/                    verify.sh, measure.sh, chaos-*.sh
+.github/workflows/validate.yml   CI for the monitoring configuration
+</code></pre>
+<pre><code class="language-bash">cp .env.example .env &amp;&amp; docker compose up -d --build &amp;&amp; ./scripts/verify.sh
+</code></pre>
+<p><code>verify.sh</code> checks 20 things: service health, Tempo/Prometheus readiness, all scrape targets up, app metrics,
+Tempo-generated span and service-graph metrics, Tempo trace search, Grafana health, provisioned data sources (2),
+dashboards (3) and alert rules (6), and the Mailpit API.</p>
+<h3>5.3 Sample application</h3>
+<p>Two Flask microservices give the traces a real distributed call chain:</p>
+<ul>
+<li><strong>store-api</strong> — <code>GET /api/products</code> calls inventory-service and enriches the result (span <code>products.enrich</code>);
+<code>POST /api/checkout</code> reserves stock in inventory-service then processes a payment (span <code>payment.process</code>, ~2 % random
+&quot;payment gateway timeout&quot; → HTTP 502, span status ERROR).</li>
+<li><strong>inventory-service</strong> — in-memory product &quot;database&quot; (<code>GET /inventory</code> with span <code>db.query</code>, <code>POST /reserve</code> with span
+<code>db.update</code>).</li>
+<li>Both expose <code>/health</code>, <code>/metrics</code> and <strong>chaos endpoints</strong>: <code>/chaos/latency</code>, <code>/chaos/errors</code>, <code>/chaos/cpu</code>
+(one busy-loop subprocess per core — subprocesses avoid Python&#39;s GIL), <code>/chaos/reset</code>, <code>/chaos/status</code>.</li>
+</ul>
+<p>Instrumentation (<code>metrics.py</code>) records, for every request except <code>/metrics</code> and <code>/health</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Type</th>
+<th>Labels</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>http_requests_total</code></td>
+<td>counter</td>
+<td>service, method, route (template, not raw path), status</td>
+</tr>
+<tr>
+<td><code>http_request_duration_seconds</code></td>
+<td>histogram (5 ms … 10 s) with <code>trace_id</code> exemplar</td>
+<td>service, method, route</td>
+</tr>
+<tr>
+<td><code>http_requests_in_progress</code></td>
+<td>gauge</td>
+<td>service</td>
+</tr>
+<tr>
+<td><code>orders_total</code></td>
+<td>counter</td>
+<td>result (success/failed)</td>
+</tr>
+<tr>
+<td><code>inventory_stock_units</code></td>
+<td>gauge</td>
+<td>product</td>
+</tr>
+<tr>
+<td><code>chaos_active</code></td>
+<td>gauge</td>
+<td>service, type</td>
+</tr>
+</tbody></table>
+<pre><code class="language-python">ctx = trace.get_current_span().get_span_context()
+trace_id = format(ctx.trace_id, &quot;032x&quot;) if ctx.is_valid else None
+LATENCY.labels(service_name, request.method, route).observe(
+    duration, exemplar={&quot;trace_id&quot;: trace_id} if trace_id else None)
+</code></pre>
+<p><code>/metrics</code> is served by <code>prometheus_client.make_wsgi_app()</code>, which negotiates the <strong>OpenMetrics</strong> format — required
+for exemplars to reach Prometheus.</p>
+<h3>5.4 Key configuration</h3>
+<p><strong>Tempo</strong> (<code>tempo/tempo.yaml</code>, excerpt):</p>
+<pre><code class="language-yaml">distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc: { endpoint: &quot;0.0.0.0:4317&quot; }
+metrics_generator:
+  storage:
+    remote_write:
+      - url: http://prometheus:9090/api/v1/write
+        send_exemplars: true
+overrides:
+  defaults:
+    metrics_generator:
+      processors: [service-graphs, span-metrics, local-blocks]
+</code></pre>
+<p><strong>Prometheus</strong> runs with <code>--web.enable-remote-write-receiver</code> and <code>--enable-feature=exemplar-storage</code>.
+<strong>Grafana data sources</strong> link Prometheus exemplars to Tempo (<code>exemplarTraceIdDestinations: trace_id → tempo</code>) and
+Tempo to Prometheus for the service map and trace-to-metrics queries.</p>
+<h3>5.5 Dashboards</h3>
+<p>All three dashboards are generated from one Python script (<code>scripts/gen_dashboards.py</code>), refresh every 5 s and link to
+each other.</p>
+<p><strong>01 – System Overview</strong> — CPU, memory and disk gauges (green/yellow/red thresholds), uptime, cores, RAM; CPU by mode
+with an 80 % threshold line, memory breakdown, network receive/transmit (mirrored), disk I/O, load averages and a
+filesystem table.</p>
+<p><img src="../screenshots/04-dashboard-system.png" alt="System overview"></p>
+<p><strong>02 – Application Performance</strong> — the RED method (Rate, Errors, Duration): service health (UP/DOWN), request rate,
+error %, p95, in-flight requests; requests by route, responses by status code, p50/p95/p99 latency <strong>with exemplars</strong>,
+error rate, p95 by route, orders per minute, inventory stock, and a timeline of active chaos experiments.</p>
+<p><img src="../screenshots/05-dashboard-app.png" alt="Application performance"></p>
+<p><strong>03 – Traces &amp; Service Map (Grafana Tempo)</strong> — Tempo service map, TraceQL tables (recent errors, slow traces &gt; 500 ms,
+checkout traces), span rate / p95 / error rate per service from the metrics-generator, and service-to-service request
+and failure rates.</p>
+<p><img src="../screenshots/06-dashboard-traces.png" alt="Traces and service map"></p>
+<h3>5.6 Alert rules</h3>
+<p>Six Grafana-managed rules (folder <em>DevOps IA Alerts</em>, group <code>observability-demo</code>, evaluated every 10 s). Each follows
+the pattern <strong>A</strong> PromQL query → <strong>B</strong> reduce (last) → <strong>C</strong> threshold. All route to the <code>devops-team-email</code> contact
+point (group wait 10 s, group interval 30 s, repeat 10 min) and send a <em>Resolved</em> email on recovery.</p>
+<table>
+<thead>
+<tr>
+<th>Rule</th>
+<th>Expression (A)</th>
+<th>Condition</th>
+<th>For</th>
+<th>No data</th>
+<th>Severity</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>High CPU Usage</td>
+<td><code>100 - avg(rate(node_cpu_seconds_total{mode=&quot;idle&quot;}[1m]))*100</code></td>
+<td>&gt; 80</td>
+<td>30 s</td>
+<td>NoData</td>
+<td>critical</td>
+</tr>
+<tr>
+<td>High Memory Usage</td>
+<td><code>(1 - MemAvailable/MemTotal) * 100</code></td>
+<td>&gt; 90</td>
+<td>1 m</td>
+<td>NoData</td>
+<td>warning</td>
+</tr>
+<tr>
+<td>Low Disk Space</td>
+<td>root-disk used %</td>
+<td>&gt; 90</td>
+<td>1 m</td>
+<td>NoData</td>
+<td>warning</td>
+</tr>
+<tr>
+<td>High HTTP Error Rate</td>
+<td>5xx share of all requests (%)</td>
+<td>&gt; 5</td>
+<td>30 s</td>
+<td>OK</td>
+<td>critical</td>
+</tr>
+<tr>
+<td>High p95 Latency</td>
+<td><code>histogram_quantile(0.95, …http_request_duration_seconds_bucket…)</code></td>
+<td>&gt; 1 s</td>
+<td>30 s</td>
+<td>OK</td>
+<td>warning</td>
+</tr>
+<tr>
+<td>Service Down</td>
+<td>`up{job=~&quot;store-api</td>
+<td>inventory-service&quot;}`</td>
+<td>&lt; 1</td>
+<td>15 s</td>
+<td>Alerting</td>
+</tr>
+</tbody></table>
+<p><em>Service Down</em> is <strong>multi-dimensional</strong>: the query returns one series per job, so Grafana creates one alert instance
+per service and the email names the service that is down.</p>
+<h2>6. Practical Demonstration Results</h2>
+<h3>6.1 Stack up and provisioned</h3>
+<p><img src="../screenshots/01-compose-ps.png" alt="docker compose ps"></p>
+<p><img src="../screenshots/02-prometheus-targets.png" alt="Prometheus targets"></p>
+<p><img src="../screenshots/03-grafana-datasources.png" alt="Provisioned data sources"></p>
+<h3>6.2 Distributed tracing with Grafana Tempo</h3>
+<p>The service map is drawn from Tempo&#39;s service-graph metrics: <code>user</code> (k6, which is not itself traced) → store-api →
+inventory-service, with request rate and average latency on each node.</p>
+<p><img src="../screenshots/07-service-map.png" alt="Service map"></p>
+<p>A single checkout trace contains spans from <strong>both</strong> services — proof that the W3C <code>traceparent</code> header propagated the
+context across the HTTP call:</p>
+<p><img src="../screenshots/08-trace-waterfall.png" alt="Trace waterfall"></p>
+<p>TraceQL search in Explore:</p>
+<p><img src="../screenshots/09-traceql-explore.png" alt="TraceQL in Explore"></p>
+<p>Exemplars (dots) on the latency graph; each carries the <code>trace_id</code> of a real request in that latency bucket:</p>
+<p><img src="../screenshots/10-exemplar-to-trace.png" alt="Exemplars"></p>
+<h3>6.3 Scenario 1 — latency in a downstream service (<code>chaos-latency.sh</code>)</h3>
+<p>1.5 s of latency was injected into inventory-service. Store-api&#39;s p95 crossed 1 s; following an exemplar from the
+spike leads to a trace where the waterfall immediately shows the slow span is <code>db.query</code> <strong>inside inventory-service</strong>,
+not store-api — root cause in one click instead of guessing.</p>
+<p><img src="../screenshots/11-latency-chaos-trace.png" alt="Slow db.query span"></p>
+<h3>6.4 Scenario 2 — CPU saturation and alert email (<code>chaos-cpu.sh</code>)</h3>
+<p>One busy-loop process per core drives host CPU to ~100 %. The gauge turns red, <em>High CPU Usage</em> goes Pending →
+Firing, the email arrives in Mailpit, and after <code>chaos-restore.sh</code> a <em>Resolved</em> email follows.</p>
+<p><img src="../screenshots/12-cpu-spike-gauge.png" alt="CPU gauge red"></p>
+<p><img src="../screenshots/13-alert-firing.png" alt="Alert firing"></p>
+<p><img src="../screenshots/14-mailpit-firing-email.png" alt="Firing email"></p>
+<p><img src="../screenshots/15-mailpit-resolved-email.png" alt="Resolved email"></p>
+<h3>6.5 Scenario 3 — error injection (<code>chaos-errors.sh</code>)</h3>
+<p>40 % of store-api <code>/api/*</code> requests return HTTP 500 with the exception recorded on the span. The error-rate panels turn
+red, <em>Recent Error Traces</em> fills with failing traces and <em>High HTTP Error Rate</em> fires.</p>
+<p><img src="../screenshots/16-error-traces.png" alt="Error traces"></p>
+<h3>6.6 Scenario 4 — downstream service killed (<code>chaos-kill-inventory.sh</code>)</h3>
+<p><code>docker compose stop inventory-service</code>: the health stat shows DOWN, store-api answers 503 (&quot;inventory unavailable&quot;),
+failed requests appear on the service map, and <em>Service Down</em> fires for <code>inventory-service</code> only.</p>
+<p><img src="../screenshots/17-service-down.png" alt="Service down"></p>
+<p><img src="../screenshots/17b-service-down-map.png" alt="Service map during outage"></p>
+<p><img src="../screenshots/17c-service-down-email.png" alt="Service Down email"></p>
+<h2>7. Comparison and Evaluation</h2>
+<h3>7.1 Tracing backends — Grafana Tempo vs alternatives</h3>
+<table>
+<thead>
+<tr>
+<th>Criteria</th>
+<th><strong>Grafana Tempo</strong></th>
+<th>Jaeger</th>
+<th>Zipkin</th>
+<th>Elastic APM</th>
+<th>Datadog APM</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>License / cost</td>
+<td>Open source (AGPLv3); Grafana Cloud paid option</td>
+<td>Open source (Apache 2.0), CNCF graduated</td>
+<td>Open source (Apache 2.0)</td>
+<td>Elastic license / paid tiers</td>
+<td>Commercial SaaS, per-host + ingestion pricing</td>
+</tr>
+<tr>
+<td>Storage backend</td>
+<td>Object storage only (S3, GCS, Azure, local); Parquet blocks</td>
+<td>Cassandra, Elasticsearch/OpenSearch, Badger, memory</td>
+<td>Cassandra, Elasticsearch, MySQL, memory</td>
+<td>Elasticsearch</td>
+<td>Vendor-managed</td>
+</tr>
+<tr>
+<td>Indexing</td>
+<td>No full index → very cheap at scale</td>
+<td>Indexed in the DB</td>
+<td>Indexed</td>
+<td>Indexed</td>
+<td>Managed</td>
+</tr>
+<tr>
+<td>Query language</td>
+<td>TraceQL (attributes, structure, metrics)</td>
+<td>Search by service/operation/tags</td>
+<td>Search by service/tags</td>
+<td>KQL / Kibana UI</td>
+<td>Proprietary UI</td>
+</tr>
+<tr>
+<td>Ingest protocols</td>
+<td>OTLP, Jaeger, Zipkin, OpenCensus</td>
+<td>OTLP, Jaeger</td>
+<td>Zipkin (OTLP via collector)</td>
+<td>OTLP, Elastic agents</td>
+<td>Datadog agent, OTLP</td>
+</tr>
+<tr>
+<td>Metrics from traces</td>
+<td>Built-in metrics-generator (RED + service graph)</td>
+<td>SPM with extra components</td>
+<td>No</td>
+<td>Yes</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>UI</td>
+<td>Grafana (with metrics, logs, alerts)</td>
+<td>Own UI</td>
+<td>Own UI</td>
+<td>Kibana</td>
+<td>Datadog UI</td>
+</tr>
+<tr>
+<td>Operational complexity</td>
+<td>Low (single binary; microservices mode for scale)</td>
+<td>Medium (needs DB)</td>
+<td>Low–medium</td>
+<td>Medium–high (ES cluster)</td>
+<td>Very low (SaaS)</td>
+</tr>
+<tr>
+<td>Vendor lock-in</td>
+<td>None (OTel)</td>
+<td>None</td>
+<td>None</td>
+<td>Moderate</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Best fit</td>
+<td>Teams on Grafana/Prometheus wanting cheap high-volume tracing</td>
+<td>Standalone mature tracing</td>
+<td>Simple / legacy setups</td>
+<td>Elastic-stack teams</td>
+<td>Fully managed all-in-one</td>
+</tr>
+</tbody></table>
+<h3>7.2 Visualisation / monitoring UIs — Grafana vs alternatives</h3>
+<table>
+<thead>
+<tr>
+<th>Criteria</th>
+<th><strong>Grafana</strong></th>
+<th>Kibana</th>
+<th>Prometheus UI</th>
+<th>Datadog Dashboards</th>
+<th>AWS CloudWatch</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Data sources</td>
+<td>100+ (Prometheus, Tempo, Loki, SQL, cloud…)</td>
+<td>Mainly Elasticsearch</td>
+<td>Own TSDB only</td>
+<td>Datadog only</td>
+<td>AWS metrics/logs</td>
+</tr>
+<tr>
+<td>Dashboards</td>
+<td>Rich, templated, many panel types</td>
+<td>Strong for log analytics</td>
+<td>Very basic graphs</td>
+<td>Rich</td>
+<td>Moderate</td>
+</tr>
+<tr>
+<td>Alerting</td>
+<td>Unified, multi-channel</td>
+<td>Yes (some paid)</td>
+<td>Via separate Alertmanager</td>
+<td>Yes</td>
+<td>Alarms + SNS</td>
+</tr>
+<tr>
+<td>Config as code</td>
+<td>Provisioning YAML/JSON, Terraform, API</td>
+<td>Saved-objects API</td>
+<td>Config files</td>
+<td>API / Terraform</td>
+<td>CloudFormation / Terraform</td>
+</tr>
+<tr>
+<td>Cost</td>
+<td>Free OSS</td>
+<td>Free basic, paid tiers</td>
+<td>Free</td>
+<td>Paid</td>
+<td>Pay-per-use</td>
+</tr>
+<tr>
+<td>Lock-in</td>
+<td>None</td>
+<td>Elastic</td>
+<td>None</td>
+<td>High</td>
+<td>AWS</td>
+</tr>
+</tbody></table>
+<h3>7.3 Measured results</h3>
+<p>All values below were measured on our stack with <code>scripts/measure.sh</code> (raw output in <code>docs/measure-output.txt</code>);
+none are estimates.</p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Value (measured)</th>
+<th>How measured</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Total RAM used by stack (8 containers)</td>
+<td>977 MiB</td>
+<td><code>docker stats</code></td>
+</tr>
+<tr>
+<td>Tempo RAM</td>
+<td>472 MiB</td>
+<td><code>docker stats</code></td>
+</tr>
+<tr>
+<td>Tempo disk after ~37 min (k6 ≈ 11 req/s → ≈ 18 HTTP req/s across both services)</td>
+<td>42.6 MB</td>
+<td><code>du -sh /var/tempo</code></td>
+</tr>
+<tr>
+<td>Spans ingested per second</td>
+<td>≈ 51</td>
+<td><code>sum(rate(tempo_distributor_spans_received_total[1m]))</code></td>
+</tr>
+<tr>
+<td>Prometheus head series / disk</td>
+<td>9 353 / 14.2 MB</td>
+<td><code>prometheus_tsdb_head_series</code>, <code>du</code></td>
+</tr>
+<tr>
+<td>Trace lookup by ID (5 traces)</td>
+<td>4.5 – 39 ms, avg 13.6 ms</td>
+<td><code>curl -w %{time_total}</code> on <code>/api/traces/&lt;id&gt;</code></td>
+</tr>
+<tr>
+<td>CPU alert: burn start → Firing</td>
+<td>79.3 / 80.0 / 80.0 s, <strong>avg 79.8 s</strong></td>
+<td><code>measure.sh</code>, 3 runs</td>
+</tr>
+<tr>
+<td>CPU alert: burn start → email in Mailpit</td>
+<td>88.8 / 89.4 / 89.4 s, <strong>avg 89.2 s</strong></td>
+<td><code>measure.sh</code>, 3 runs</td>
+</tr>
+<tr>
+<td>Setup time from clone</td>
+<td>not measured on a fresh machine yet</td>
+<td>manual (fill in after a fresh-clone run)</td>
+</tr>
+</tbody></table>
+<p><strong>Alert timing breakdown.</strong> Burn-start-to-Firing (≈ 80 s) is longer than the naive &quot;evaluation 10 s + <code>for</code> 30 s&quot;
+because the CPU expression uses <code>rate(...[1m])</code>: the 1-minute window must fill with mostly-busy samples before the
+average crosses 80 % (≈ 30–40 s after the burn starts), then the rule spends 30 s in <em>Pending</em>, plus up to 10 s of
+evaluation-interval alignment and 5 s scrape interval. The email follows ≈ 10 s after Firing (<code>group_wait: 10s</code>).
+A shorter window (<code>[30s]</code>) or <code>for: 15s</code> would cut detection time at the cost of more false positives on short spikes —
+a classic sensitivity vs. noise trade-off.</p>
+<h3>7.4 Discussion</h3>
+<p><strong>Strengths observed.</strong></p>
+<ul>
+<li>One pane of glass: metrics, traces and alerts live in Grafana; exemplars and the service map connect them.</li>
+<li>Root-cause time drops from &quot;guess which service&quot; to one click (Scenario 1).</li>
+<li>Everything is provisioned as code and version-controlled; a fresh clone needs one command.</li>
+<li>Tempo is light: it needs only disk/object storage and used under 500 MiB RAM while ingesting ~51 spans/s; trace lookup
+by ID took 4–39 ms.</li>
+<li>OpenTelemetry keeps the services vendor-neutral — switching to Jaeger or a SaaS would need no code change.</li>
+</ul>
+<p><strong>Limitations observed.</strong></p>
+<ul>
+<li>Tempo search relies on recent blocks and TraceQL scans rather than a full index, so very broad historical searches are
+slower than in an indexed system.</li>
+<li>Local-disk storage is not highly available; production needs S3/GCS and Tempo&#39;s microservices mode.</li>
+<li>Grafana alert-rule provisioning YAML is verbose (we generate it).</li>
+<li>On Docker Desktop, Node Exporter measures the Linux VM, not the laptop; the VM has no <code>/</code> disk, so the disk queries
+use <code>/var/lib/docker</code> there.</li>
+<li>One gunicorn worker limits app throughput (Prometheus multiprocess mode is needed for more workers).</li>
+<li>The logs pillar (Grafana Loki) is not covered.</li>
+</ul>
+<h2>8. Challenges Faced and Solutions</h2>
+<table>
+<thead>
+<tr>
+<th>Challenge</th>
+<th>Cause</th>
+<th>Solution</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>node-exporter failed: <code>path / is mounted on / but it is not a shared or slave mount</code></td>
+<td>Docker Desktop rejects <code>rslave</code> mount propagation</td>
+<td>Mount <code>/:/host:ro</code></td>
+</tr>
+<tr>
+<td>Disk gauge showed &quot;No data&quot;</td>
+<td>Docker Desktop&#39;s VM has no <code>/</code> filesystem (only <code>/var/lib/docker</code>, virtiofs shares, tmpfs)</td>
+<td>Query `mountpoint=~&quot;/</td>
+</tr>
+<tr>
+<td>Network Traffic showed only a few bytes/s</td>
+<td>node-exporter in a bridge network sees only its own container&#39;s <code>eth0</code></td>
+<td>Run node-exporter with <code>network_mode: host</code>; pin the compose subnet so Prometheus scrapes it at the bridge gateway (<code>docker-host:9100</code>)</td>
+</tr>
+<tr>
+<td><code>chaos-restore.sh</code> did not stop the CPU burn</td>
+<td><code>pkill</code> is not installed in <code>python:3.12-slim</code></td>
+<td>The service tracks its burn subprocesses and terminates them in <code>/chaos/reset</code></td>
+</tr>
+<tr>
+<td><code>curl :3200/ready</code> returned &quot;waiting for 15s after being ready&quot;</td>
+<td>Tempo&#39;s ingester reports ready only 15 s after the first readiness check</td>
+<td><code>verify.sh</code> retries the check for up to 30 s</td>
+</tr>
+<tr>
+<td><code>$__tags</code> in Tempo → metrics queries disappeared</td>
+<td>Grafana provisioning substitutes <code>$VAR</code> environment variables</td>
+<td>Escape as <code>$$__tags</code> in <code>datasources.yaml</code></td>
+</tr>
+<tr>
+<td>Measured time-to-alert longer than the configured <code>for</code></td>
+<td><code>rate([1m])</code> smoothing (see §7.3)</td>
+<td>Documented the breakdown; kept 1 m window to avoid flapping</td>
+</tr>
+</tbody></table>
+<h2>9. Conclusion and Future Scope</h2>
+<p>We built a reproducible observability stack that satisfies the registered demonstration — Grafana with Prometheus,
+CPU/memory/disk/network and application-performance dashboards with gauges and graphs, and threshold alerts delivered by
+email — and adds Grafana Tempo as a first-class tracing backend. The four chaos scenarios showed the complementary
+roles: <strong>metrics and alerts tell us <em>that</em> something is wrong; traces in Tempo tell us <em>where and why</em></strong>, and Grafana
+connects both.</p>
+<p><strong>Future scope:</strong> Grafana Loki for logs with trace-to-logs links; Kubernetes deployment with Helm charts; S3/MinIO
+storage for Tempo; Slack/Teams/Telegram contact points; SLO dashboards with error budgets; an OpenTelemetry Collector
+or Grafana Alloy pipeline with tail sampling.</p>
+<h2>10. References</h2>
+<ol>
+<li>Grafana documentation — <a href="https://grafana.com/docs/grafana/latest/">https://grafana.com/docs/grafana/latest/</a></li>
+<li>Grafana Tempo documentation — <a href="https://grafana.com/docs/tempo/latest/">https://grafana.com/docs/tempo/latest/</a></li>
+<li>TraceQL — <a href="https://grafana.com/docs/tempo/latest/traceql/">https://grafana.com/docs/tempo/latest/traceql/</a></li>
+<li>Prometheus documentation — <a href="https://prometheus.io/docs/">https://prometheus.io/docs/</a></li>
+<li>Node Exporter — <a href="https://github.com/prometheus/node_exporter">https://github.com/prometheus/node_exporter</a></li>
+<li>OpenTelemetry documentation — <a href="https://opentelemetry.io/docs/">https://opentelemetry.io/docs/</a></li>
+<li>W3C Trace Context — <a href="https://www.w3.org/TR/trace-context/">https://www.w3.org/TR/trace-context/</a></li>
+<li>k6 documentation — <a href="https://grafana.com/docs/k6/latest/">https://grafana.com/docs/k6/latest/</a></li>
+<li>Mailpit — <a href="https://mailpit.axllent.org/">https://mailpit.axllent.org/</a></li>
+</ol>
+<h2>Appendix A — Commands</h2>
+<pre><code class="language-bash">docker compose up -d --build            # start (add --profile full for cAdvisor)
+./scripts/verify.sh                     # 20 health checks
+./scripts/chaos-latency.sh 1500 120     # latency in inventory-service
+./scripts/chaos-cpu.sh 120              # CPU burn → High CPU Usage alert
+./scripts/chaos-errors.sh 0.4 120       # 40 % HTTP 500 → High HTTP Error Rate
+./scripts/chaos-kill-inventory.sh       # Service Down
+./scripts/chaos-restore.sh              # undo everything
+./scripts/measure.sh 3                  # evaluation numbers incl. 3 MTTD runs
+docker compose down -v                  # stop and delete data
+</code></pre>
+<h2>Appendix B — Resource footprint</h2>
+<p><img src="../screenshots/18-docker-stats.png" alt="docker stats"></p>
+</body></html>

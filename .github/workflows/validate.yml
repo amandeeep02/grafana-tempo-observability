@@ -1,0 +1,42 @@
+name: validate
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compose file is valid
+        run: cp .env.example .env && docker compose config -q
+
+      - name: Prometheus config is valid
+        run: >
+          docker run --rm -v "$PWD/prometheus:/cfg" --entrypoint promtool
+          prom/prometheus:v3.4.1 check config /cfg/prometheus.yml
+
+      - name: Dashboards are valid JSON and up to date with the generator
+        run: |
+          for f in grafana/dashboards/*.json; do python -m json.tool "$f" > /dev/null; done
+          python scripts/gen_dashboards.py
+          git diff --exit-code grafana/dashboards
+
+      - name: Lint provisioning YAML
+        run: |
+          pip install yamllint
+          yamllint -d '{extends: relaxed, rules: {line-length: disable}}' \
+            grafana/provisioning tempo prometheus docker-compose.yml
+
+      - name: Build app images
+        run: docker compose build store-api inventory-service
+
+      - name: Smoke test apps
+        run: |
+          docker compose up -d inventory-service store-api
+          for i in $(seq 1 30); do curl -sf localhost:8000/api/products && break; sleep 2; done
+          curl -sf localhost:8000/api/products | python -m json.tool > /dev/null
+          curl -sf -H 'Accept: application/openmetrics-text' localhost:8000/metrics | grep -q 'http_requests_total'
+          docker compose down
