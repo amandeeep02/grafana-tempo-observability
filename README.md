@@ -147,30 +147,6 @@ Full tables, measured results and discussion: `docs/report/`.
 
 Raw output: `docs/measure-output.txt` (re-run with `./scripts/measure.sh`).
 
-## Troubleshooting
-
-| Symptom | Fix |
-|---|---|
-| node-exporter: `path / is mounted on / but it is not a shared or slave mount` | Docker Desktop rejects `rslave`; the compose file uses `/:/host:ro` (Linux servers may add `,rslave`). |
-| Disk gauge "No data" | Docker Desktop's VM has no `/` disk — queries use `mountpoint=~"/\|/var/lib/docker"`. On other hosts check `node_filesystem_size_bytes` labels. |
-| `curl localhost:3200/ready` says *waiting for 15s after being ready* | Normal: Tempo's ingester reports ready 15 s after the first readiness poll. `verify.sh` retries. |
-| Tempo `permission denied /var/tempo` | Keep `user: "0"` on the tempo service, or `docker compose down -v`. |
-| Apps log `StatusCode.UNAVAILABLE` exporting spans | Tempo not up yet / bound to localhost — `endpoint: "0.0.0.0:4317"` in `tempo.yaml`; the exporter retries. |
-| No traces / service map empty | Wait 1–2 min; check `curl localhost:3200/api/search`, Prometheus query `traces_service_graph_request_total`, `docker logs tempo`. |
-| No exemplar dots | Prometheus needs `--enable-feature=exemplar-storage`; check `curl -H 'Accept: application/openmetrics-text' localhost:8000/metrics \| grep trace_id`. |
-| CPU alert never fires | Burn longer; `docker exec store-api ps aux`; temporarily lower the threshold. |
-| No email | `docker logs grafana \| grep -i smtp`; Alerting → Contact points → Test. |
-| `$__tags` error in trace → metrics links | `datasources.yaml` must use `$$__tags` (provisioning env-var substitution). |
-| Metrics halved/inconsistent | Keep gunicorn at `-w 1 --threads 8` (per-process Prometheus registry). |
-| Port in use | Change the host side of the port mapping in `docker-compose.yml`. |
-| Network Traffic shows only a few B/s | node-exporter must run with `network_mode: host` (already set) — in a bridge network it only sees its own container's `eth0`. Prometheus reaches it at the pinned bridge gateway `docker-host` (172.30.250.1). |
-| `Pool overlaps with other one on this address space` | Another Docker network uses 172.30.250.0/24 — change the subnet/gateway in `docker-compose.yml` and the `docker-host` entry under `prometheus.extra_hosts`. |
-| `chaos-restore.sh` does not stop the CPU burn | `/chaos/reset` terminates the burner processes; check `curl localhost:8000/chaos/status`. |
-| Laptop slow | Skip cAdvisor; halve k6 rates in `load/k6/script.js`. |
-
-The service map shows the caller of store-api as `user` because k6 itself is not traced — Tempo labels un-instrumented
-callers this way.
-
 ## Project structure
 
 ```
